@@ -1,0 +1,15 @@
+[INFO] Conversation capture started at 2026-07-19T21:17:51.3809554+02:00
+[INFO] Input markdown: .\conversation.md
+[INFO] Markdown export: .\conversation-exports\conversation-20260719-211751.md
+[INFO] Slide markdown export: .\conversation-exports\conversation-20260719-211751.slides.md
+[INFO] Mermaid mind map export: .\conversation-exports\conversation-20260719-211751.mmd
+[INFO] DOCX export target: .\conversation-exports\conversation-20260719-211751.docx
+[INFO] PDF export target: .\conversation-exports\conversation-20260719-211751.pdf
+[INFO] PPTX export target: .\conversation-exports\conversation-20260719-211751.pptx
+[INFO] GitHub owner resolved to: antoniooreany
+[INFO] Repository target: antoniooreany/project-context-tool
+[INFO] Repository creation enabled: True
+[INFO] Project creation enabled: True
+[INFO] Backlog creation enabled: True
+[INFO] GitHub Project number: 10
+[INFO] Conversation capture completed at 2026-07-19T21:18:24.5105604+02:00

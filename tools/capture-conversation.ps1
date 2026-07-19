@@ -25,19 +25,24 @@ function Test-Command {
 }
 
 function Write-Info {
-  param([string]$Message)
+  param([Parameter(Mandatory)][string]$Message)
   Write-Host "[INFO] $Message"
 }
 
 function Write-Warn {
-  param([string]$Message)
+  param([Parameter(Mandatory)][string]$Message)
   Write-Warning "[WARN] $Message"
+}
+
+function Write-Fail {
+  param([Parameter(Mandatory)][string]$Message)
+  throw "[ERROR] $Message"
 }
 
 function Ensure-Directory {
   param([Parameter(Mandatory)][string]$Path)
   if (-not (Test-Path $Path)) {
-    New-Item -ItemType Directory -Path $Path | Out-Null
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
   }
 }
 
@@ -49,6 +54,40 @@ function Save-TextFile {
   $parent = Split-Path -Parent $Path
   if ($parent) { Ensure-Directory -Path $parent }
   Set-Content -Path $Path -Value $Content -Encoding UTF8
+}
+
+function Invoke-NativeCommand {
+  param(
+    [Parameter(Mandatory)][string]$FilePath,
+    [string[]]$Arguments = @(),
+    [switch]$AllowFailure,
+    [switch]$CaptureOutput
+  )
+
+  $global:LASTEXITCODE = 0
+
+  if ($CaptureOutput) {
+    $output = & $FilePath @Arguments 2>&1
+    $exitCode = $global:LASTEXITCODE
+    if (-not $AllowFailure -and $exitCode -ne 0) {
+      $text = ($output | Out-String).Trim()
+      throw "Command failed ($exitCode): $FilePath $($Arguments -join ' ')`n$text"
+    }
+    return @{
+      ExitCode = $exitCode
+      Output   = ($output | Out-String)
+    }
+  } else {
+    & $FilePath @Arguments
+    $exitCode = $global:LASTEXITCODE
+    if (-not $AllowFailure -and $exitCode -ne 0) {
+      throw "Command failed ($exitCode): $FilePath $($Arguments -join ' ')"
+    }
+    return @{
+      ExitCode = $exitCode
+      Output   = $null
+    }
+  }
 }
 
 function New-SlidesMarkdownFromConversation {
@@ -163,13 +202,25 @@ function Invoke-PandocExport {
   }
 
   Write-Info "Pandoc detected. Exporting DOCX."
-  & pandoc $MarkdownPath -o $DocxPath
+  Invoke-NativeCommand -FilePath "pandoc" -Arguments @($MarkdownPath, "-o", $DocxPath) | Out-Null
 
   Write-Info "Pandoc detected. Exporting PDF."
-  & pandoc $MarkdownPath -o $PdfPath
+  Invoke-NativeCommand -FilePath "pandoc" -Arguments @($MarkdownPath, "-o", $PdfPath) | Out-Null
 
   Write-Info "Pandoc detected. Exporting PPTX from slide-formatted markdown."
-  & pandoc $SlidesMarkdownPath -o $PptxPath
+  Invoke-NativeCommand -FilePath "pandoc" -Arguments @($SlidesMarkdownPath, "-o", $PptxPath) | Out-Null
+}
+
+function Ensure-GitHubCli {
+  if (-not (Test-Command "gh")) {
+    Write-Fail "GitHub CLI was not found."
+  }
+}
+
+function Ensure-Git {
+  if (-not (Test-Command "git")) {
+    Write-Fail "Git was not found."
+  }
 }
 
 function Ensure-GitHubOwner {
@@ -179,57 +230,129 @@ function Ensure-GitHubOwner {
     return $Owner
   }
 
-  if (-not (Test-Command "gh")) {
-    throw "GitHub CLI was not found and GitHubOwner was not provided."
+  Ensure-GitHubCli
+  $result = Invoke-NativeCommand -FilePath "gh" -Arguments @("api", "user", "--jq", ".login") -CaptureOutput
+  $resolved = $result.Output.Trim()
+
+  if ([string]::IsNullOrWhiteSpace($resolved)) {
+    Write-Fail "GitHub owner could not be resolved from gh authentication."
   }
 
-  return (& gh api user --jq '.login').Trim()
+  return $resolved
 }
 
-function Invoke-GitHubRepositorySetup {
+function Ensure-GitRepository {
+  Ensure-Git
+
+  if (-not (Test-Path ".git")) {
+    Write-Info "Initializing local git repository."
+    Invoke-NativeCommand -FilePath "git" -Arguments @("init") | Out-Null
+    Invoke-NativeCommand -FilePath "git" -Arguments @("branch", "-M", "main") | Out-Null
+  }
+
+  $result = Invoke-NativeCommand -FilePath "git" -Arguments @("rev-parse", "--show-toplevel") -CaptureOutput
+  $root = $result.Output.Trim()
+
+  if ([string]::IsNullOrWhiteSpace($root)) {
+    Write-Fail "Local git repository root could not be determined."
+  }
+
+  Write-Info "Local git repository detected at $root"
+  return $root
+}
+
+function Test-GitHubRepoExists {
+  param(
+    [Parameter(Mandatory)][string]$Owner,
+    [Parameter(Mandatory)][string]$RepoName
+  )
+
+  Ensure-GitHubCli
+  $fullRepo = "$Owner/$RepoName"
+  $result = Invoke-NativeCommand -FilePath "gh" -Arguments @("repo", "view", $fullRepo) -AllowFailure -CaptureOutput
+  return ($result.ExitCode -eq 0)
+}
+
+function Ensure-OriginRemote {
+  param(
+    [Parameter(Mandatory)][string]$Owner,
+    [Parameter(Mandatory)][string]$RepoName
+  )
+
+  $remoteUrl = "https://github.com/$Owner/$RepoName.git"
+  $check = Invoke-NativeCommand -FilePath "git" -Arguments @("remote", "get-url", "origin") -AllowFailure -CaptureOutput
+
+  if ($check.ExitCode -eq 0) {
+    $existing = $check.Output.Trim()
+    if ($existing -ne $remoteUrl) {
+      Write-Info "Updating origin remote URL."
+      Invoke-NativeCommand -FilePath "git" -Arguments @("remote", "set-url", "origin", $remoteUrl) | Out-Null
+    } else {
+      Write-Info "Origin remote already configured."
+    }
+  } else {
+    Write-Info "Adding origin remote."
+    Invoke-NativeCommand -FilePath "git" -Arguments @("remote", "add", "origin", $remoteUrl) | Out-Null
+  }
+}
+
+function Ensure-GitHubRepo {
   param(
     [Parameter(Mandatory)][string]$Owner,
     [Parameter(Mandatory)][string]$RepoName,
-    [Parameter(Mandatory)][string]$Visibility,
-    [switch]$Force
+    [Parameter(Mandatory)][string]$Visibility
   )
 
-  if (-not (Test-Command "gh")) {
-    Write-Warn "GitHub CLI was not found. Repository setup was skipped."
-    return
-  }
+  Ensure-GitHubCli
+  Ensure-GitRepository | Out-Null
 
   $fullRepo = "$Owner/$RepoName"
 
-  try {
-    & gh repo view $fullRepo | Out-Null
-    Write-Info "Repository already exists: $fullRepo"
-  } catch {
-    Write-Info "Creating repository: $fullRepo"
-    & gh repo create $fullRepo --$Visibility --source . --remote origin
+  if (Test-GitHubRepoExists -Owner $Owner -RepoName $RepoName) {
+    Write-Info "GitHub repository already exists: $fullRepo"
+  } else {
+    Write-Info "Creating GitHub repository: $fullRepo"
+    Invoke-NativeCommand -FilePath "gh" -Arguments @("repo", "create", $fullRepo, "--$Visibility", "--source", ".", "--remote", "origin") | Out-Null
   }
 
-  try {
-    git rev-parse --is-inside-work-tree | Out-Null
-    Write-Info "Local git repository detected."
-  } catch {
-    Write-Info "Initializing local git repository."
-    git init | Out-Null
+  Ensure-OriginRemote -Owner $Owner -RepoName $RepoName
+  return $fullRepo
+}
+
+function Push-CurrentBranch {
+  Ensure-GitRepository | Out-Null
+  Write-Info "Staging current changes."
+  Invoke-NativeCommand -FilePath "git" -Arguments @("add", ".") | Out-Null
+
+  $status = Invoke-NativeCommand -FilePath "git" -Arguments @("status", "--porcelain") -CaptureOutput
+  if (-not [string]::IsNullOrWhiteSpace($status.Output)) {
+    Write-Info "Creating commit for current changes."
+    $commitResult = Invoke-NativeCommand -FilePath "git" -Arguments @("commit", "-m", "Update conversation exports and project artifacts") -AllowFailure -CaptureOutput
+    if ($commitResult.ExitCode -ne 0) {
+      Write-Warn "Commit was not created automatically. Continuing."
+    }
+  } else {
+    Write-Info "No staged changes required for commit."
   }
 
-  try {
-    git remote get-url origin | Out-Null
-  } catch {
-    Write-Info "Adding origin remote."
-    git remote add origin "https://github.com/$fullRepo.git"
+  Write-Info "Pushing current branch to origin."
+  Invoke-NativeCommand -FilePath "git" -Arguments @("push", "-u", "origin", "HEAD") | Out-Null
+}
+
+function Ensure-ProjectScopes {
+  Ensure-GitHubCli
+
+  $status = Invoke-NativeCommand -FilePath "gh" -Arguments @("auth", "status") -CaptureOutput
+  $text = $status.Output
+
+  $hasProject = $text -match "project"
+  $hasReadProject = $text -match "read:project"
+
+  if (-not $hasProject -or -not $hasReadProject) {
+    Write-Fail "GitHub CLI token is missing required scopes for projects. Run: gh auth refresh -h github.com -s project,read:project"
   }
 
-  if ($Force) {
-    Write-Info "Pushing current branch to origin."
-    git add . | Out-Null
-    try { git commit -m "Initialize project context tool" | Out-Null } catch { }
-    git push -u origin HEAD
-  }
+  Write-Info "GitHub CLI project scopes are available."
 }
 
 function Ensure-GitHubLabel {
@@ -240,12 +363,20 @@ function Ensure-GitHubLabel {
     [Parameter(Mandatory)][string]$Description
   )
 
-  try {
-    & gh label create $Name --repo $Repo --color $Color --description $Description | Out-Null
+  $result = Invoke-NativeCommand -FilePath "gh" -Arguments @("label", "create", $Name, "--repo", $Repo, "--color", $Color, "--description", $Description) -AllowFailure -CaptureOutput
+  $output = $result.Output
+
+  if ($result.ExitCode -eq 0) {
     Write-Info "Label created: $Name"
-  } catch {
-    Write-Info "Label already exists or could not be created: $Name"
+    return
   }
+
+  if ($output -match "already exists") {
+    Write-Info "Label already exists: $Name"
+    return
+  }
+
+  Write-Fail "Failed to create label '$Name'. $output"
 }
 
 function Create-GitHubLabels {
@@ -274,20 +405,25 @@ function New-IssueIfNeeded {
     [Parameter(Mandatory)][string[]]$Labels
   )
 
-  try {
-    $existing = & gh issue list --repo $Repo --search $Title --json title --jq '.[].title'
-    if ($existing -and ($existing -split "`n") -contains $Title) {
+  $list = Invoke-NativeCommand -FilePath "gh" -Arguments @("issue", "list", "--repo", $Repo, "--search", $Title, "--json", "title", "--jq", ".[].title") -AllowFailure -CaptureOutput
+  if ($list.ExitCode -eq 0) {
+    $titles = @($list.Output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($titles -contains $Title) {
       Write-Info "Issue already exists: $Title"
       return
     }
-  } catch { }
+  }
 
   $labelArgs = @()
   foreach ($label in $Labels) {
     $labelArgs += @("--label", $label)
   }
 
-  & gh issue create --repo $Repo --title $Title --body $Body @labelArgs | Out-Null
+  $create = Invoke-NativeCommand -FilePath "gh" -Arguments (@("issue", "create", "--repo", $Repo, "--title", $Title, "--body", $Body) + $labelArgs) -AllowFailure -CaptureOutput
+  if ($create.ExitCode -ne 0) {
+    Write-Fail "Failed to create issue '$Title'. $($create.Output)"
+  }
+
   Write-Info "Issue created: $Title"
 }
 
@@ -307,31 +443,29 @@ function Create-GitHubProjectAndCaptureId {
     [Parameter(Mandatory)][string]$Title
   )
 
-  if (-not (Test-Command "gh")) {
-    Write-Warn "GitHub CLI was not found. Project creation was skipped."
-    return $null
-  }
+  Ensure-ProjectScopes
 
-  try {
-    & gh project create --owner $Owner --title $Title | Out-Null
-    Write-Info "GitHub Project creation command executed."
-  } catch {
-    Write-Warn "GitHub Project could not be created automatically."
-  }
-
-  try {
-    $projectsJson = & gh project list --owner $Owner --format json
-    $projects = $projectsJson | ConvertFrom-Json
-    $project = $projects.projects | Where-Object { $_.title -eq $Title } | Select-Object -First 1
-    if ($project) {
-      Write-Info "GitHub Project located: $Title (#$($project.number))"
-      return $project.number
+  $create = Invoke-NativeCommand -FilePath "gh" -Arguments @("project", "create", "--owner", $Owner, "--title", $Title) -AllowFailure -CaptureOutput
+  if ($create.ExitCode -ne 0) {
+    if ($create.Output -match "already exists") {
+      Write-Info "GitHub Project already exists: $Title"
+    } else {
+      Write-Fail "Failed to create GitHub Project '$Title'. $($create.Output)"
     }
-  } catch {
-    Write-Warn "GitHub Project lookup failed."
+  } else {
+    Write-Info "GitHub Project created: $Title"
   }
 
-  return $null
+  $list = Invoke-NativeCommand -FilePath "gh" -Arguments @("project", "list", "--owner", $Owner, "--format", "json") -CaptureOutput
+  $projects = $list.Output | ConvertFrom-Json
+  $project = $projects.projects | Where-Object { $_.title -eq $Title } | Select-Object -First 1
+
+  if (-not $project) {
+    Write-Fail "GitHub Project '$Title' could not be located after creation."
+  }
+
+  Write-Info "GitHub Project located: $Title (#$($project.number))"
+  return $project.number
 }
 
 function Add-IssuesToProject {
@@ -341,23 +475,26 @@ function Add-IssuesToProject {
     [Parameter(Mandatory)][string]$Repo
   )
 
-  try {
-    $issues = & gh issue list --repo $Repo --limit 100 --json number,title | ConvertFrom-Json
-    foreach ($issue in $issues) {
-      try {
-        & gh project item-add $ProjectNumber --owner $Owner --url "https://github.com/$Repo/issues/$($issue.number)" | Out-Null
-        Write-Info "Added issue to project: #$($issue.number) $($issue.title)"
-      } catch {
-        Write-Info "Issue already added or could not be added: #$($issue.number)"
-      }
+  Ensure-ProjectScopes
+
+  $issuesResult = Invoke-NativeCommand -FilePath "gh" -Arguments @("issue", "list", "--repo", $Repo, "--limit", "100", "--json", "number,title") -CaptureOutput
+  $issues = $issuesResult.Output | ConvertFrom-Json
+
+  foreach ($issue in $issues) {
+    $url = "https://github.com/$Repo/issues/$($issue.number)"
+    $add = Invoke-NativeCommand -FilePath "gh" -Arguments @("project", "item-add", $ProjectNumber, "--owner", $Owner, "--url", $url) -AllowFailure -CaptureOutput
+    if ($add.ExitCode -eq 0) {
+      Write-Info "Added issue to project: #$($issue.number) $($issue.title)"
+    } elseif ($add.Output -match "already exists") {
+      Write-Info "Issue already linked to project: #$($issue.number)"
+    } else {
+      Write-Fail "Failed to add issue #$($issue.number) to project. $($add.Output)"
     }
-  } catch {
-    Write-Warn "Issues could not be added to the project."
   }
 }
 
 if (-not (Test-Path $InputMarkdown)) {
-  throw "Input markdown file '$InputMarkdown' was not found."
+  Write-Fail "Input markdown file '$InputMarkdown' was not found."
 }
 
 Ensure-Directory -Path $OutputDir
@@ -409,11 +546,17 @@ if ($CreateRepository -or $CreateGitHubProject -or $CreateBacklog) {
 }
 
 if ($CreateRepository) {
-  Invoke-GitHubRepositorySetup -Owner $GitHubOwner -RepoName $RepoName -Visibility $RepositoryVisibility -Force:$Force
+  $repoFullName = Ensure-GitHubRepo -Owner $GitHubOwner -RepoName $RepoName -Visibility $RepositoryVisibility
+  if ($Force) {
+    Push-CurrentBranch
+  }
   Create-GitHubLabels -Repo $repoFullName
 }
 
 if ($CreateBacklog) {
+  if (-not $repoFullName) {
+    Write-Fail "Backlog creation requires a resolved GitHub repository."
+  }
   Create-BacklogIssues -Repo $repoFullName
 }
 
