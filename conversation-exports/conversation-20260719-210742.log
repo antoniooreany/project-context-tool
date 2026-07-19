@@ -1,0 +1,12 @@
+[INFO] Conversation capture started at 2026-07-19T21:07:42.3023015+02:00
+[INFO] Input markdown: C:\Users\anton\Projects\project-context-tool\conversation.md
+[INFO] Markdown export: C:\Users\anton\Projects\project-context-tool\conversation-exports\conversation-20260719-210742.md
+[INFO] Slide markdown export: C:\Users\anton\Projects\project-context-tool\conversation-exports\conversation-20260719-210742.slides.md
+[INFO] Mermaid mind map export: C:\Users\anton\Projects\project-context-tool\conversation-exports\conversation-20260719-210742.mmd
+[INFO] DOCX export target: C:\Users\anton\Projects\project-context-tool\conversation-exports\conversation-20260719-210742.docx
+[INFO] PDF export target: C:\Users\anton\Projects\project-context-tool\conversation-exports\conversation-20260719-210742.pdf
+[INFO] PPTX export target: C:\Users\anton\Projects\project-context-tool\conversation-exports\conversation-20260719-210742.pptx
+[INFO] Repository creation enabled: False
+[INFO] Project creation enabled: False
+[INFO] Backlog creation enabled: False
+[INFO] Conversation capture completed at 2026-07-19T21:07:42.3024329+02:00

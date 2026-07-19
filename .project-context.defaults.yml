@@ -1,0 +1,51 @@
+languagePolicy:
+  projectLanguage: en
+  allowNonEnglishArtifacts: false
+  failOnNonEnglishStaticTemplates: true
+
+contracts:
+  builtin: true
+  userPaths: []
+  allowNewTypes: true
+
+plugins:
+  analyzers:
+    builtin: true
+    userPaths: []
+    allowUnknown: true
+  detectors:
+    builtin: true
+    userPaths: []
+    allowUnknown: true
+  builders:
+    builtin: true
+    userPaths: []
+  triggers:
+    builtin: true
+    userPaths: []
+  fixtures:
+    builtin: true
+    userPaths: []
+  profiles:
+    builtin: true
+    userPaths: []
+  hooks:
+    builtin: true
+    userPaths: []
+  serializers:
+    builtin: true
+    userPaths: []
+
+detection:
+  mode: auto
+  autoThresholdPercent: 75
+  strictThresholdPercent: 85
+  lowConfidenceThresholdPercent: 45
+  logAllCandidates: true
+  logOverallConfidence: true
+  unknownStackMode: activate-fallback
+
+refresh:
+  mode: smart
+  staleAfterHours: 24
+  fingerprintMode: hybrid
