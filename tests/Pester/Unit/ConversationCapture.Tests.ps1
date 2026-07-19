@@ -1,5 +1,5 @@
 Describe "Conversation capture script" {
-  It "contains a Mode parameter" {
+  It "contains Mode parameter" {
     $content = Get-Content ".\tools\capture-conversation.ps1" -Raw
     $content | Should -Match 'Mode'
   }
