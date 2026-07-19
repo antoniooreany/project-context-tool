@@ -1,5 +1,4 @@
 param(
-  [Parameter(Mandatory)]
   [string]$InputMarkdown,
 
   [string]$OutputDir = ".\conversation-exports",
@@ -9,6 +8,8 @@ param(
   [string]$ProjectDescription = "Universal project context generator for AI agents and humans.",
   [ValidateSet("public","private","internal")]
   [string]$RepositoryVisibility = "public",
+  [ValidateSet("Full","LocalOnly","RepoOnly","ProjectOnly","BacklogOnly")]
+  [string]$Mode = "Full",
   [switch]$CreateRepository,
   [switch]$CreateGitHubProject,
   [switch]$CreateBacklog,
@@ -90,13 +91,51 @@ function Invoke-NativeCommand {
   }
 }
 
+function Get-ModeFlags {
+  param([Parameter(Mandatory)][string]$Mode)
+
+  switch ($Mode) {
+    "LocalOnly" {
+      return @{
+        CreateRepository    = $false
+        CreateGitHubProject = $false
+        CreateBacklog       = $false
+      }
+    }
+    "RepoOnly" {
+      return @{
+        CreateRepository    = $true
+        CreateGitHubProject = $false
+        CreateBacklog       = $false
+      }
+    }
+    "ProjectOnly" {
+      return @{
+        CreateRepository    = $false
+        CreateGitHubProject = $true
+        CreateBacklog       = $false
+      }
+    }
+    "BacklogOnly" {
+      return @{
+        CreateRepository    = $false
+        CreateGitHubProject = $false
+        CreateBacklog       = $true
+      }
+    }
+    default {
+      return @{
+        CreateRepository    = $true
+        CreateGitHubProject = $true
+        CreateBacklog       = $true
+      }
+    }
+  }
+}
+
 function New-SlidesMarkdownFromConversation {
-  param(
-    [Parameter(Mandatory)][string]$SourceMarkdown
-  )
-
+  param([Parameter(Mandatory)][string]$SourceMarkdown)
   $raw = Get-Content -Path $SourceMarkdown -Raw -Encoding UTF8
-
   return @"
 % Project Context Tool Conversation Capture
 % Automated Export
@@ -141,10 +180,7 @@ $($raw -replace '\r?\n', "`n")
 }
 
 function New-MindMapContent {
-  param(
-    [Parameter(Mandatory)][string]$ProjectName
-  )
-
+  param([Parameter(Mandatory)][string]$ProjectName)
   return @"
 mindmap
   root(($ProjectName))
@@ -226,9 +262,7 @@ function Ensure-Git {
 function Ensure-GitHubOwner {
   param([string]$Owner)
 
-  if ($Owner) {
-    return $Owner
-  }
+  if ($Owner) { return $Owner }
 
   Ensure-GitHubCli
   $result = Invoke-NativeCommand -FilePath "gh" -Arguments @("api", "user", "--jq", ".login") -CaptureOutput
@@ -259,6 +293,75 @@ function Ensure-GitRepository {
 
   Write-Info "Local git repository detected at $root"
   return $root
+}
+
+function Ensure-GitIgnore {
+  $path = ".gitignore"
+  $lines = @(
+    ".DS_Store"
+    "Thumbs.db"
+    ".idea/"
+    ".vscode/"
+    "conversation-exports/"
+    "*.tmp"
+    "*.bak"
+  )
+
+  if (-not (Test-Path $path)) {
+    Save-TextFile -Path $path -Content ($lines -join [Environment]::NewLine)
+    Write-Info ".gitignore created."
+    return
+  }
+
+  $existing = Get-Content -Path $path -Encoding UTF8
+  $changed = $false
+
+  foreach ($line in $lines) {
+    if ($existing -notcontains $line) {
+      Add-Content -Path $path -Value $line -Encoding UTF8
+      $changed = $true
+    }
+  }
+
+  if ($changed) {
+    Write-Info ".gitignore updated."
+  } else {
+    Write-Info ".gitignore already contains required rules."
+  }
+}
+
+function Ensure-GitAttributes {
+  $path = ".gitattributes"
+  $content = @"
+* text=auto
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.xml text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+"@
+
+  if (-not (Test-Path $path)) {
+    Save-TextFile -Path $path -Content $content
+    Write-Info ".gitattributes created."
+    return
+  }
+
+  $existing = Get-Content -Path $path -Raw -Encoding UTF8
+  if ($existing -ne $content) {
+    Save-TextFile -Path $path -Content $content
+    Write-Info ".gitattributes updated."
+  } else {
+    Write-Info ".gitattributes already up to date."
+  }
 }
 
 function Test-GitHubRepoExists {
@@ -319,20 +422,30 @@ function Ensure-GitHubRepo {
   return $fullRepo
 }
 
-function Push-CurrentBranch {
+function Push-RepositoryFilesOnly {
   Ensure-GitRepository | Out-Null
-  Write-Info "Staging current changes."
+  Ensure-GitIgnore
+  Ensure-GitAttributes
+
+  Write-Info "Refreshing git index for ignored generated files."
+  Invoke-NativeCommand -FilePath "git" -Arguments @("rm", "-r", "--cached", "--ignore-unmatch", "conversation-exports") -AllowFailure | Out-Null
+
+  Write-Info "Staging repository files only."
+  Invoke-NativeCommand -FilePath "git" -Arguments @("add", ".gitignore", ".gitattributes", "README.md", ".project-context.defaults.yml", "conversation.md", "docs", "tools") -AllowFailure | Out-Null
   Invoke-NativeCommand -FilePath "git" -Arguments @("add", ".") | Out-Null
 
   $status = Invoke-NativeCommand -FilePath "git" -Arguments @("status", "--porcelain") -CaptureOutput
-  if (-not [string]::IsNullOrWhiteSpace($status.Output)) {
-    Write-Info "Creating commit for current changes."
-    $commitResult = Invoke-NativeCommand -FilePath "git" -Arguments @("commit", "-m", "Update conversation exports and project artifacts") -AllowFailure -CaptureOutput
+  $lines = @($status.Output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  $filtered = @($lines | Where-Object { $_ -notmatch "conversation-exports/" })
+
+  if ($filtered.Count -gt 0) {
+    Write-Info "Creating commit for repository changes."
+    $commitResult = Invoke-NativeCommand -FilePath "git" -Arguments @("commit", "-m", "Update project artifacts and automation scripts") -AllowFailure -CaptureOutput
     if ($commitResult.ExitCode -ne 0) {
       Write-Warn "Commit was not created automatically. Continuing."
     }
   } else {
-    Write-Info "No staged changes required for commit."
+    Write-Info "No repository file changes detected for commit."
   }
 
   Write-Info "Pushing current branch to origin."
@@ -493,9 +606,16 @@ function Add-IssuesToProject {
   }
 }
 
-if (-not (Test-Path $InputMarkdown)) {
-  Write-Fail "Input markdown file '$InputMarkdown' was not found."
+if ($Mode -in @("Full", "LocalOnly")) {
+  if ([string]::IsNullOrWhiteSpace($InputMarkdown) -or -not (Test-Path $InputMarkdown)) {
+    Write-Fail "Input markdown file '$InputMarkdown' was not found."
+  }
 }
+
+$flags = Get-ModeFlags -Mode $Mode
+$CreateRepository = $flags.CreateRepository
+$CreateGitHubProject = $flags.CreateGitHubProject
+$CreateBacklog = $flags.CreateBacklog
 
 Ensure-Directory -Path $OutputDir
 
@@ -525,8 +645,12 @@ if (-not $SkipPandoc) {
   Invoke-PandocExport -MarkdownPath $mdPath -DocxPath $docxPath -PdfPath $pdfPath -PptxPath $pptxPath -SlidesMarkdownPath $slidesMdPath
 }
 
+Ensure-GitIgnore
+Ensure-GitAttributes
+
 $logLines = @()
 $logLines += "[INFO] Conversation capture started at $(Get-Date -Format o)"
+$logLines += "[INFO] Mode: $Mode"
 $logLines += "[INFO] Input markdown: $InputMarkdown"
 $logLines += "[INFO] Markdown export: $mdPath"
 $logLines += "[INFO] Slide markdown export: $slidesMdPath"
@@ -548,7 +672,7 @@ if ($CreateRepository -or $CreateGitHubProject -or $CreateBacklog) {
 if ($CreateRepository) {
   $repoFullName = Ensure-GitHubRepo -Owner $GitHubOwner -RepoName $RepoName -Visibility $RepositoryVisibility
   if ($Force) {
-    Push-CurrentBranch
+    Push-RepositoryFilesOnly
   }
   Create-GitHubLabels -Repo $repoFullName
 }
@@ -556,6 +680,9 @@ if ($CreateRepository) {
 if ($CreateBacklog) {
   if (-not $repoFullName) {
     Write-Fail "Backlog creation requires a resolved GitHub repository."
+  }
+  if (-not (Test-GitHubRepoExists -Owner $GitHubOwner -RepoName $RepoName)) {
+    Write-Fail "Backlog creation requires an existing GitHub repository."
   }
   Create-BacklogIssues -Repo $repoFullName
 }
