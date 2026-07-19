@@ -21,10 +21,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install Pester
+      - name: Ensure Pester is available
         shell: pwsh
         run: |
-          Install-Module Pester -Force -SkipPublisherCheck -Scope CurrentUser
+          if (-not (Get-Module -ListAvailable -Name Pester)) {
+            Write-Error "Pester module not found on runner."
+          }
 
       - name: Run Pester tests
         shell: pwsh
