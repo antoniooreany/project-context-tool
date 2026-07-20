@@ -1,4 +1,6 @@
+[CmdletBinding()]
 param(
+  [Parameter(Mandatory)]
   [string]$InputMarkdown,
 
   [string]$OutputDir = ".\conversation-exports",
@@ -78,16 +80,16 @@ function Invoke-NativeCommand {
       ExitCode = $exitCode
       Output   = ($output | Out-String)
     }
-  } else {
-    & $FilePath @Arguments
-    $exitCode = $global:LASTEXITCODE
-    if (-not $AllowFailure -and $exitCode -ne 0) {
-      throw "Command failed ($exitCode): $FilePath $($Arguments -join ' ')"
-    }
-    return @{
-      ExitCode = $exitCode
-      Output   = $null
-    }
+  }
+
+  & $FilePath @Arguments
+  $exitCode = $global:LASTEXITCODE
+  if (-not $AllowFailure -and $exitCode -ne 0) {
+    throw "Command failed ($exitCode): $FilePath $($Arguments -join ' ')"
+  }
+  return @{
+    ExitCode = $exitCode
+    Output   = $null
   }
 }
 
@@ -422,6 +424,22 @@ function Ensure-GitHubRepo {
   return $fullRepo
 }
 
+function Get-RepositoryFilesToStage {
+  $candidates = @(
+    ".gitignore",
+    ".gitattributes",
+    "README.md",
+    ".project-context.defaults.yml",
+    "conversation.md",
+    "docs",
+    "tools",
+    "src",
+    "tests"
+  )
+
+  return @($candidates | Where-Object { Test-Path $_ })
+}
+
 function Push-RepositoryFilesOnly {
   Ensure-GitRepository | Out-Null
   Ensure-GitIgnore
@@ -430,8 +448,13 @@ function Push-RepositoryFilesOnly {
   Write-Info "Refreshing git index for ignored generated files."
   Invoke-NativeCommand -FilePath "git" -Arguments @("rm", "-r", "--cached", "--ignore-unmatch", "conversation-exports") -AllowFailure | Out-Null
 
-  Write-Info "Staging repository files only."
-  Invoke-NativeCommand -FilePath "git" -Arguments @("add", ".gitignore", ".gitattributes", "README.md", ".project-context.defaults.yml", "conversation.md", "docs", "tools") -AllowFailure | Out-Null
+  $filesToStage = Get-RepositoryFilesToStage
+  if ($filesToStage.Count -gt 0) {
+    Write-Info "Staging selected repository files."
+    Invoke-NativeCommand -FilePath "git" -Arguments (@("add") + $filesToStage) | Out-Null
+  }
+
+  Write-Info "Staging remaining repository changes."
   Invoke-NativeCommand -FilePath "git" -Arguments @("add", ".") | Out-Null
 
   $status = Invoke-NativeCommand -FilePath "git" -Arguments @("status", "--porcelain") -CaptureOutput
@@ -606,9 +629,65 @@ function Add-IssuesToProject {
   }
 }
 
-if ($Mode -in @("Full", "LocalOnly")) {
+function Export-ConversationArtifacts {
+  param(
+    [Parameter(Mandatory)][string]$InputMarkdown,
+    [Parameter(Mandatory)][string]$OutputDir,
+    [Parameter(Mandatory)][string]$ProjectName,
+    [switch]$SkipPandoc
+  )
+
   if ([string]::IsNullOrWhiteSpace($InputMarkdown) -or -not (Test-Path $InputMarkdown)) {
     Write-Fail "Input markdown file '$InputMarkdown' was not found."
+  }
+
+  Ensure-Directory -Path $OutputDir
+
+  $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $baseName = "conversation-$timestamp"
+
+  $mdPath       = Join-Path $OutputDir "$baseName.md"
+  $docxPath     = Join-Path $OutputDir "$baseName.docx"
+  $pdfPath      = Join-Path $OutputDir "$baseName.pdf"
+  $pptxPath     = Join-Path $OutputDir "$baseName.pptx"
+  $logPath      = Join-Path $OutputDir "$baseName.log"
+  $mindMapPath  = Join-Path $OutputDir "$baseName.mmd"
+  $slidesMdPath = Join-Path $OutputDir "$baseName.slides.md"
+
+  Copy-Item $InputMarkdown $mdPath -Force
+  Write-Info "Markdown transcript copied to $mdPath"
+
+  $slidesMarkdown = New-SlidesMarkdownFromConversation -SourceMarkdown $mdPath
+  Save-TextFile -Path $slidesMdPath -Content $slidesMarkdown
+  Write-Info "Slide-formatted markdown created at $slidesMdPath"
+
+  $mindMap = New-MindMapContent -ProjectName $ProjectName
+  Save-TextFile -Path $mindMapPath -Content $mindMap
+  Write-Info "Mermaid mind map created at $mindMapPath"
+
+  if (-not $SkipPandoc) {
+    Invoke-PandocExport -MarkdownPath $mdPath -DocxPath $docxPath -PdfPath $pdfPath -PptxPath $pptxPath -SlidesMarkdownPath $slidesMdPath
+  }
+
+  $logLines = @()
+  $logLines += "[INFO] Conversation capture started at $(Get-Date -Format o)"
+  $logLines += "[INFO] Input markdown: $InputMarkdown"
+  $logLines += "[INFO] Markdown export: $mdPath"
+  $logLines += "[INFO] Slide markdown export: $slidesMdPath"
+  $logLines += "[INFO] Mermaid mind map export: $mindMapPath"
+  $logLines += "[INFO] DOCX export target: $docxPath"
+  $logLines += "[INFO] PDF export target: $pdfPath"
+  $logLines += "[INFO] PPTX export target: $pptxPath"
+  $logLines += "[INFO] Conversation capture completed at $(Get-Date -Format o)"
+
+  Save-TextFile -Path $logPath -Content ($logLines -join [Environment]::NewLine)
+  Write-Info "Plain log created at $logPath"
+
+  return @{
+    MarkdownPath = $mdPath
+    SlidesPath   = $slidesMdPath
+    MindMapPath  = $mindMapPath
+    LogPath      = $logPath
   }
 }
 
@@ -617,47 +696,18 @@ $CreateRepository = $flags.CreateRepository
 $CreateGitHubProject = $flags.CreateGitHubProject
 $CreateBacklog = $flags.CreateBacklog
 
-Ensure-Directory -Path $OutputDir
+$artifacts = Export-ConversationArtifacts -InputMarkdown $InputMarkdown -OutputDir $OutputDir -ProjectName $ProjectTitle -SkipPandoc:$SkipPandoc
 
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$baseName = "conversation-$timestamp"
-
-$mdPath       = Join-Path $OutputDir "$baseName.md"
-$docxPath     = Join-Path $OutputDir "$baseName.docx"
-$pdfPath      = Join-Path $OutputDir "$baseName.pdf"
-$pptxPath     = Join-Path $OutputDir "$baseName.pptx"
-$logPath      = Join-Path $OutputDir "$baseName.log"
-$mindMapPath  = Join-Path $OutputDir "$baseName.mmd"
-$slidesMdPath = Join-Path $OutputDir "$baseName.slides.md"
-
-Copy-Item $InputMarkdown $mdPath -Force
-Write-Info "Markdown transcript copied to $mdPath"
-
-$slidesMarkdown = New-SlidesMarkdownFromConversation -SourceMarkdown $mdPath
-Save-TextFile -Path $slidesMdPath -Content $slidesMarkdown
-Write-Info "Slide-formatted markdown created at $slidesMdPath"
-
-$mindMap = New-MindMapContent -ProjectName "Project Context Tool"
-Save-TextFile -Path $mindMapPath -Content $mindMap
-Write-Info "Mermaid mind map created at $mindMapPath"
-
-if (-not $SkipPandoc) {
-  Invoke-PandocExport -MarkdownPath $mdPath -DocxPath $docxPath -PdfPath $pdfPath -PptxPath $pptxPath -SlidesMarkdownPath $slidesMdPath
+if ($Mode -eq "LocalOnly") {
+  Write-Info "LocalOnly mode selected. Skipping repository and GitHub automation."
+  Write-Info "Conversation capture completed."
+  return
 }
 
-Ensure-GitIgnore
-Ensure-GitAttributes
-
-$logLines = @()
-$logLines += "[INFO] Conversation capture started at $(Get-Date -Format o)"
-$logLines += "[INFO] Mode: $Mode"
-$logLines += "[INFO] Input markdown: $InputMarkdown"
-$logLines += "[INFO] Markdown export: $mdPath"
-$logLines += "[INFO] Slide markdown export: $slidesMdPath"
-$logLines += "[INFO] Mermaid mind map export: $mindMapPath"
-$logLines += "[INFO] DOCX export target: $docxPath"
-$logLines += "[INFO] PDF export target: $pdfPath"
-$logLines += "[INFO] PPTX export target: $pptxPath"
+if ($CreateRepository) {
+  Ensure-GitIgnore
+  Ensure-GitAttributes
+}
 
 $repoFullName = $null
 $projectNumber = $null
@@ -665,16 +715,16 @@ $projectNumber = $null
 if ($CreateRepository -or $CreateGitHubProject -or $CreateBacklog) {
   $GitHubOwner = Ensure-GitHubOwner -Owner $GitHubOwner
   $repoFullName = "$GitHubOwner/$RepoName"
-  $logLines += "[INFO] GitHub owner resolved to: $GitHubOwner"
-  $logLines += "[INFO] Repository target: $repoFullName"
+  Write-Info "GitHub owner resolved to: $GitHubOwner"
+  Write-Info "Repository target: $repoFullName"
 }
 
 if ($CreateRepository) {
   $repoFullName = Ensure-GitHubRepo -Owner $GitHubOwner -RepoName $RepoName -Visibility $RepositoryVisibility
+  Create-GitHubLabels -Repo $repoFullName
   if ($Force) {
     Push-RepositoryFilesOnly
   }
-  Create-GitHubLabels -Repo $repoFullName
 }
 
 if ($CreateBacklog) {
@@ -694,14 +744,4 @@ if ($CreateGitHubProject) {
   }
 }
 
-$logLines += "[INFO] Repository creation enabled: $CreateRepository"
-$logLines += "[INFO] Project creation enabled: $CreateGitHubProject"
-$logLines += "[INFO] Backlog creation enabled: $CreateBacklog"
-if ($projectNumber) {
-  $logLines += "[INFO] GitHub Project number: $projectNumber"
-}
-$logLines += "[INFO] Conversation capture completed at $(Get-Date -Format o)"
-
-Save-TextFile -Path $logPath -Content ($logLines -join [Environment]::NewLine)
-Write-Info "Plain log created at $logPath"
-Write-Info "Conversation capture completed."
+Write-Info "Conversation capture completed."	
